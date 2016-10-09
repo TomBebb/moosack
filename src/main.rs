@@ -1,30 +1,23 @@
-extern crate sdl2;
-extern crate sdl2_mixer;
 extern crate gtk;
-extern crate sqlite;
-extern crate hyper;
-mod player;
-// mod signal;
-mod source;
+extern crate gdk;
+extern crate moosack;
+extern crate vlc;
+
+use moosack::{Config, EventType, Player, Src, MUSIC_EXT};
+
 use gtk::prelude::*;
-use gtk::{FileFilter, FileChooserDialog,FileChooserAction, Object, Builder, Window, ToolButton};
+use gtk::{Builder, FileFilter, FileChooserDialog, FileChooserAction, Object, ToolButton, Window};
+use gdk::EventKey;
 
-use std::cell::Cell;
+use vlc::Meta;
+
+use std::mem;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering, ATOMIC_BOOL_INIT};
 
-use player::{Player, PlayEvent};
-use source::Src;
-
-const MIME_TYPES: [&'static str; 4] = [
-    "audio/mpeg",
-    "audio/ogg",
-    "audio/vnd.wav",
-    "audio/flac"
-];
-
-fn get_builder_obj<'a, T>(builder: &'a mut Builder, name: &str) -> T where T: IsA<Object> {
+fn get_builder_obj<'a, T>(builder: &'a mut Builder, name: &str) -> T
+    where T: IsA<Object>
+{
     if let Some(obj) = builder.get_object(name) {
         obj
     } else {
@@ -40,13 +33,13 @@ pub struct Ui {
     pub play: ToolButton,
     pub pause: ToolButton,
     pub stop: ToolButton,
-    pub skip: ToolButton
+    pub skip: ToolButton,
 }
 impl Ui {
     pub fn new(builder: &mut Builder) -> Ui {
         let filter = FileFilter::new();
-        for mime in &MIME_TYPES {
-            filter.add_mime_type(mime);
+        for ext in &MUSIC_EXT {
+            filter.add_pattern(&format!("*.{}", ext));
         }
         Ui {
             filter: filter,
@@ -59,13 +52,36 @@ impl Ui {
         }
     }
     pub fn init(&self, player: Arc<Mutex<Player>>) {
-        let filter = self.filter.clone();
+        self.window.set_icon_name(Some("applications-multimedia"));
         let player2 = player.clone();
         let window = self.window.clone();
+        self.window.connect_event(move |_, e| {
+            if let Ok(e) = e.clone().downcast::<EventKey>() {
+                match (e.get_event_type(), e.get_keyval()) {
+                    (gdk::EventType::KeyPress, 32) => {
+                        let mut player = player2.lock().unwrap();
+                        player.toggle_playing();
+                    }
+                    (gdk::EventType::KeyPress, 65363) => {
+                        let mut player = player2.lock().unwrap();
+                        player.skip();
+                    }
+                    (gdk::EventType::KeyPress, key) => println!("Key: {:?}", key),
+                    _ => (),
+                };
+                Inhibit(true)
+            } else {
+                Inhibit(false)
+            }
+        });
+        let filter = self.filter.clone();
+        let player2 = player.clone();
         self.import.connect_clicked(move |_| {
-            let dialog = FileChooserDialog::new(Some("Import music"), Some(&window), FileChooserAction::Open);
+            let dialog = FileChooserDialog::new(Some("Import music"),
+                                                Some(&window),
+                                                FileChooserAction::Open);
             dialog.set_filter(&filter);
-            dialog.add_button("Add to Playlist", 0);
+            dialog.add_button("Play", 0);
             dialog.add_button("Cancel", 1);
             dialog.set_select_multiple(true);
             dialog.show_all();
@@ -81,12 +97,10 @@ impl Ui {
             });
         });
         let player2 = player.clone();
-        self.play.connect_clicked(move |_|
-            player2.lock().unwrap().play());
+        self.play.connect_clicked(move |_| player2.lock().unwrap().play());
 
         let player2 = player.clone();
-        self.pause.connect_clicked(move |_|
-            player2.lock().unwrap().pause());
+        self.pause.connect_clicked(move |_| player2.lock().unwrap().pause());
 
         self.window.drag_dest_add_uri_targets();
 
@@ -103,14 +117,13 @@ impl Ui {
         });
 
         let player2 = player.clone();
-        self.stop.connect_clicked(move |_|
-            player2.lock().unwrap().stop());
-        
+        self.stop.connect_clicked(move |_| player2.lock().unwrap().stop());
+
         let player2 = player.clone();
         self.window.connect_delete_event(move |_, _| {
             let mut player = player2.lock().unwrap();
             player.stop();
-            MAIN_RUNNING.with(|s| s.set(false));
+            RUNNING.store(false, Ordering::Relaxed);
             Inhibit(false)
         });
         self.window.show_all();
@@ -121,57 +134,63 @@ impl Ui {
         self.stop.set_sensitive(playing);
         self.skip.set_sensitive(true);
     }
-    pub fn update_title(&self, left: usize) {
-        let title = format!("Moosack [{}]", left);
+    pub fn update_title(&self, title: &str) {
+        let title = format!("Moosack - {}", title);
         self.window.set_title(&title);
     }
 }
 
-thread_local!{
-    pub static MAIN_RUNNING: Cell<bool> = Cell::new(false);
-}
+static RUNNING: AtomicBool = ATOMIC_BOOL_INIT;
 
 pub struct App {
     player: Arc<Mutex<Player>>,
-    ui: Ui
+    ui: Ui,
 }
 impl App {
     pub fn new(builder: &mut Builder) -> App {
         App {
             player: Arc::new(Mutex::new(Player::new())),
-            ui: Ui::new(builder)
+            ui: Ui::new(builder),
         }
     }
     pub fn init(&self) {
         self.ui.init(self.player.clone());
     }
     pub fn main(&self) {
-        let ui = Arc::new(self.ui.clone());
-        let player = self.player.clone();
-        MAIN_RUNNING.with(|s| s.set(true));
-        while MAIN_RUNNING.with(Cell::get) {
-            gtk::main_iteration();
-            if let Ok(player) = player.try_lock() {
-                let recv = player.get_receiver();
-                while let Ok((event, source)) = recv.try_recv() {
-                    println!("{:?}, {:?}", event, source);
-                    match event {
-                        PlayEvent::Play | PlayEvent::Resume => ui.update(true),
-                        PlayEvent::Stop | PlayEvent::Pause => ui.update(false),
-                    }
-                    ui.update_title(player.get_queue_left());
+        let config = Config::new();
+        {
+            let mut p = self.player.lock().unwrap();
+            let files = config.scan();
+            for file in &files {
+                p.queue(Src::File(&file));
+            }
+        };
+        let p = self.player.clone();
+        let ui = self.ui.clone();
+        RUNNING.store(true, Ordering::Relaxed);
+        while RUNNING.load(Ordering::Relaxed) {
+            let mut p = p.lock().unwrap();
+            while let Some(e) = p.poll() {
+                match e.ty {
+                    EventType::Play | EventType::Resume => ui.update(true),
+                    EventType::Stop | EventType::Pause => ui.update(false),
+                }
+                let media = p.loader.get_media(Src::from(&e.src)).unwrap();
+                if let Some(title) = media.get_meta(Meta::Title) {
+                    ui.update_title(&title);
                 }
             }
+            mem::drop(p);
+            gtk::main_iteration();
         }
-        self.ui.window.destroy();
     }
 }
 
 fn main() {
-	if gtk::init().is_err() {
-		println!("Failed to initialise GTK");
-		return;
-	};
+    if gtk::init().is_err() {
+        println!("Failed to initialise GTK");
+        return;
+    };
     let glade_src = include_str!("window.glade");
     let mut builder = Builder::new_from_string(glade_src);
     let app = App::new(&mut builder);

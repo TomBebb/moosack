@@ -1,78 +1,71 @@
-use hyper::{Client, Url};
-use std::io::{Read, Write};
-use std::fs::File;
 use std::rc::Rc;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
-use sdl2_mixer::{self, Music, INIT_MP3, INIT_FLAC, INIT_MOD, INIT_FLUIDSYNTH, INIT_MODPLUG, INIT_OGG};
-use sdl2;
+use vlc::{Instance, Media};
 
-const FILE_URL: &'static str = "file://";
-
+/// A source loader, capable of caching audio sources.
 pub struct Loader {
-	urls: HashMap<String, PathBuf>
+    pub instance: Instance,
+    cache: HashMap<Source, Media>,
 }
 impl Loader {
-	pub fn new() -> Loader {
-	    let sdl = sdl2::init().unwrap();
-	    sdl.audio().unwrap();
-	    sdl.timer().unwrap();
-	    sdl2_mixer::init(INIT_MP3 | INIT_FLAC | INIT_MOD | INIT_FLUIDSYNTH | INIT_MODPLUG | INIT_OGG).unwrap();
-	    Loader {
-	    	urls: HashMap::with_capacity(16)
-	    }
-	}
-	pub fn load(&mut self, source: Src) -> Result<Music, String> {
-		match source {
-			Src::File(path) => {
-				Music::from_file(&path)
-			},
-			Src::Url(url) if url.starts_with(FILE_URL) => {
-				let url = Url::parse(url).unwrap();
-				let file = Url::to_file_path(&url).unwrap();
-				Music::from_file(&file)
-			},
-			Src::Url(url) if self.urls.contains_key(url) =>
-				Music::from_file(&self.urls[url]),
-			Src::Url(url) => {
-				let mut path = env::temp_dir();
-				path.push(self.urls.len().to_string());
-				let mut file = File::create(&path).unwrap();
-				self.urls.insert(url.to_owned(), path.clone());
-				let mut response = Client::new().get(url).send().unwrap();
-				let mut buf = Vec::with_capacity(32);
-				response.read_to_end(&mut buf).unwrap();
-				file.write(&buf).unwrap();
-				Music::from_file(&path)
-			}
-		}
-	} 
+    /// Create a new loader, with an empty cache.
+    pub fn new() -> Loader {
+        Loader {
+            instance: Instance::new().unwrap(),
+            cache: HashMap::with_capacity(8),
+        }
+    }
+    pub fn get_media(&mut self, source: Src) -> Result<&Media, String> {
+        let src = Source::from(source);
+        if !self.cache.contains_key(&src) {
+            let media = try!(self.load(source));
+            self.cache.insert(src.clone(), media);
+        }
+        Ok(&self.cache[&src])
+    }
+    /// Load music from the source `source`.
+    pub fn load(&mut self, source: Src) -> Result<Media, String> {
+        match source {
+            Src::File(path) => {
+                match Media::new_path(&self.instance, path.to_str().unwrap()) {
+                    Some(media) => Ok(media),
+                    None => Err(format!("Failed to open file {:?}", path)),
+                }
+            }
+            Src::Url(url) => {
+                match Media::new_location(&self.instance, url) {
+                    Some(media) => Ok(media),
+                    None => Err(format!("Failed to stream from URL {:?}", url)),
+                }
+            }
+        }
+    }
 }
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Src<'a> {
-	File(&'a Path),
-	Url(&'a str)
+    File(&'a Path),
+    Url(&'a str),
 }
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum Source {
-	File(Rc<PathBuf>),
-	Url(Rc<String>)
+    File(Rc<PathBuf>),
+    Url(Rc<String>),
 }
 impl<'a> From<&'a Source> for Src<'a> {
-	fn from(s: &'a Source) -> Src<'a> {
-		match *s {
-			Source::File(ref p) => Src::File(p),
-			Source::Url(ref u) => Src::Url(u)
-		}
-	}
+    fn from(s: &'a Source) -> Src<'a> {
+        match *s {
+            Source::File(ref p) => Src::File(p),
+            Source::Url(ref u) => Src::Url(u),
+        }
+    }
 }
 impl<'a> From<Src<'a>> for Source {
-	fn from(s: Src<'a>) -> Source {
-		match s {
-			Src::File(p) => Source::File(Rc::new(p.into())),
-			Src::Url(u) => Source::Url(Rc::new(u.into()))
-		}
-	}
+    fn from(s: Src<'a>) -> Source {
+        match s {
+            Src::File(p) => Source::File(Rc::new(p.into())),
+            Src::Url(u) => Source::Url(Rc::new(u.into())),
+        }
+    }
 }
