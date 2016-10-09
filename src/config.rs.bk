@@ -15,18 +15,19 @@ pub struct Config {
 
 impl Decodable for Config {
     fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
-        d.read_struct("Config", 1, |d| {
-            let libraries =
-                try!(d.read_struct_field("libraries", 0, <Vec<String> as Decodable>::decode::<D>));
-            Ok(Config { libraries: libraries.into_iter().map(PathBuf::from).collect() })
+    	d.read_struct("Config", 1, |d| {
+            let libraries = try!(d.read_struct_field("libraries", 0, <Vec<String> as Decodable>::decode::<D>));
+            Ok(Config {
+            	libraries: libraries.into_iter().map(PathBuf::from).collect()
+            })
         })
     }
 }
 impl Encodable for Config {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         s.emit_struct("Config", 1, |s| {
-            let libraries: Vec<&str> = self.libraries.iter().map(|p| p.to_str().unwrap()).collect();
-            try!(s.emit_struct_field("libraries", 0, |s| libraries.encode(s)));
+        	let libraries: Vec<&str> = self.libraries.iter().map(|p| p.to_str().unwrap()).collect();
+            try!(s.emit_struct_field("libraries", 0, |s| { libraries.encode(s) }));
             Ok(())
         })
     }
